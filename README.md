@@ -23,7 +23,7 @@ A [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoade
 
 1. Install [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoader)
 2. Download the latest release of AdvancedInventorySearch from [Releases](https://github.com/xlinka/AdvancedInventorySearch/releases)
-3. Place the `InventorySearch.dll` file in your `rml_mods` folder
+3. Place the `AdvancedInventorySearch.dll` file in your `rml_mods` folder
    - This folder is typically at `C:\Program Files (x86)\Steam\steamapps\common\Resonite\rml_mods`
    - You can create it if it doesn't exist, or launch Resonite once with ResoniteModLoader installed to have it created automatically
 4. Start Resonite and enjoy
