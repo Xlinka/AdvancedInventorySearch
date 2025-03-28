@@ -13,16 +13,47 @@ using System.Reflection;
 
 namespace AdvancedInventoryWithStorage
 {
-    public static class WorldSavingPatches
+    public static partial class WorldSavingPatches
     {
         // Reference to the main LocalStorageSystem
-        private const string LOCAL_OWNER = LocalStorageSystem.LOCAL_OWNER;
+        public const string LOCAL_OWNER = LocalStorageSystem.LOCAL_OWNER;
 
-        // This will be called from your main Mod class
+        // Reference to the custom DB storage
+        private static CustomDBStorage _customDBStorage;
+
+        // Flag to indicate if we're using custom DB
+        private static bool _useCustomDB = false;
+
+        // File server service reference
+        private static FileServerService _fileServerService;
+
+        // Flag to indicate if we're using remote storage
+        private static bool _useRemoteStorage = false;
+
+        // This will be called from the Mod class
         public static void Initialize(Harmony harmony)
         {
             // Don't call harmony.PatchAll() here - let the main mod handle it
             Msg("World saving patches initialized");
+        }
+
+        // This will be called from the Mod class to set up custom DB integration
+        public static void SetCustomDBStorage(CustomDBStorage customDBStorage)
+        {
+            _customDBStorage = customDBStorage;
+            _useCustomDB = customDBStorage != null;
+            Msg("Custom DB storage integration enabled");
+        }
+
+        // This will be called from the Mod class to set up remote storage integration
+        public static void SetFileServerService(FileServerService fileServerService, bool useRemoteStorage)
+        {
+            _fileServerService = fileServerService;
+            _useRemoteStorage = useRemoteStorage;
+            if (_useRemoteStorage)
+            {
+                Msg("Remote storage integration enabled");
+            }
         }
 
         private static void Msg(string message)
@@ -145,13 +176,54 @@ namespace AdvancedInventoryWithStorage
                         record.AssetURI = uri.ToString(); // This will reference the native Resonite saved file
                         record.RecordType = "world";
 
-                        // Save the record metadata separately
-                        string recPath = Path.Combine(LocalStorageSystem.REC_PATH, worldFolder, sanitizedName + ".json");
-                        using (var fs = File.CreateText(recPath))
+                        // If using custom DB, save there instead of JSON file
+                        if (_useCustomDB && _customDBStorage != null)
                         {
-                            JsonSerializer serializer = new JsonSerializer();
-                            serializer.Formatting = Formatting.Indented;
-                            serializer.Serialize(fs, record);
+                            bool saved = _customDBStorage.SaveRecord(record);
+                            if (saved)
+                            {
+                                Msg($"Successfully saved world record to custom database: {_name}");
+
+                                // If using remote storage, upload the world data file
+                                if (_useRemoteStorage && _fileServerService != null)
+                                {
+                                    Task.Run(async () => {
+                                        string localAssetPath = uri.ToString().Replace("res:///", "");
+                                        string fullLocalPath = Path.Combine(__instance.Engine.LocalDB.AssetStoragePath, localAssetPath);
+                                        if (File.Exists(fullLocalPath))
+                                        {
+                                            bool uploaded = await _fileServerService.UploadFile(fullLocalPath, $"assets/worlds/{record.RecordId}{Path.GetExtension(fullLocalPath)}");
+                                            if (uploaded)
+                                            {
+                                                Msg($"Uploaded world data to remote storage: {_name}");
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            else
+                            {
+                                Error($"Failed to save world record to custom database: {_name}");
+                            }
+                        }
+                        else
+                        {
+                            // Save the record metadata as JSON file (original behavior)
+                            string recPath = Path.Combine(LocalStorageSystem.REC_PATH, worldFolder, sanitizedName + ".json");
+                            using (var fs = File.CreateText(recPath))
+                            {
+                                JsonSerializer serializer = new JsonSerializer();
+                                serializer.Formatting = Formatting.Indented;
+                                serializer.Serialize(fs, record);
+                            }
+
+                            // If using remote storage, upload the JSON file
+                            if (_useRemoteStorage && _fileServerService != null)
+                            {
+                                Task.Run(async () => {
+                                    await _fileServerService.UploadFile(recPath, $"records/worlds/{sanitizedName}.json");
+                                });
+                            }
                         }
 
                         Msg($"Successfully saved world: {_name} as WorldOrb with URI: {uri}");
@@ -199,6 +271,69 @@ namespace AdvancedInventoryWithStorage
 
                 Msg($"Intercepting record save for local storage record: {record.Name} (Type: {record.RecordType})");
 
+                // If using custom DB, use that instead
+                if (_useCustomDB && _customDBStorage != null)
+                {
+                    Msg($"Using custom DB to save record: {record.Name} (Type: {record.RecordType})");
+
+                    __result = Task.Run(() => {
+                        try
+                        {
+                            // For world data, we'll use the normal Resonite DataTreeSaver for compatibility
+                            if (loadedGraph != null)
+                            {
+                                // Use the standard DataTreeSaver like Resonite does
+                                DataTreeSaver dataTreeSaver = new DataTreeSaver(__instance.Engine);
+                                Uri dataUri = dataTreeSaver.SaveLocally(loadedGraph, null).Result;
+
+                                // Update the record to point to the properly saved world data
+                                record.AssetURI = dataUri.ToString();
+
+                                Msg($"Saved record data using native Resonite format: {dataUri}");
+
+                                // If using remote storage, upload the asset file
+                                if (_useRemoteStorage && _fileServerService != null)
+                                {
+                                    Task.Run(async () => {
+                                        string localAssetPath = dataUri.ToString().Replace("res:///", "");
+                                        string fullLocalPath = Path.Combine(__instance.Engine.LocalDB.AssetStoragePath, localAssetPath);
+                                        if (File.Exists(fullLocalPath))
+                                        {
+                                            bool uploaded = await _fileServerService.UploadFile(fullLocalPath, $"assets/{record.RecordId}{Path.GetExtension(fullLocalPath)}");
+                                            if (uploaded)
+                                            {
+                                                Msg($"Uploaded record data to remote storage: {record.Name}");
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+
+                            // Save the record to our custom database
+                            bool success = _customDBStorage.SaveRecord(record);
+
+                            if (success)
+                            {
+                                Msg($"Successfully saved record to custom DB: {record.Name}");
+                                return new RecordManager.RecordSaveResult(true, null);
+                            }
+                            else
+                            {
+                                Error($"Failed to save record to custom DB: {record.Name}");
+                                return new RecordManager.RecordSaveResult(false, null);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Error($"Error saving record to custom DB: {ex.Message}");
+                            return new RecordManager.RecordSaveResult(false, null);
+                        }
+                    });
+
+                    return false;
+                }
+
+                // Otherwise, use the original JSON-based storage
                 __result = Task.Run(() =>
                 {
                     try
@@ -244,6 +379,23 @@ namespace AdvancedInventoryWithStorage
                             record.AssetURI = dataUri.ToString();
 
                             Msg($"Saved record data using native Resonite format: {dataUri}");
+
+                            // If using remote storage, upload the asset file
+                            if (_useRemoteStorage && _fileServerService != null)
+                            {
+                                Task.Run(async () => {
+                                    string localAssetPath = dataUri.ToString().Replace("res:///", "");
+                                    string fullLocalPath = Path.Combine(__instance.Engine.LocalDB.AssetStoragePath, localAssetPath);
+                                    if (File.Exists(fullLocalPath))
+                                    {
+                                        bool uploaded = await _fileServerService.UploadFile(fullLocalPath, $"assets/{record.RecordId}{Path.GetExtension(fullLocalPath)}");
+                                        if (uploaded)
+                                        {
+                                            Msg($"Uploaded record data to remote storage: {record.Name}");
+                                        }
+                                    }
+                                });
+                            }
                         }
 
                         // Save the record metadata separately
@@ -253,6 +405,14 @@ namespace AdvancedInventoryWithStorage
                             JsonSerializer serializer = new JsonSerializer();
                             serializer.Formatting = Formatting.Indented;
                             serializer.Serialize(fs, record);
+                        }
+
+                        // If using remote storage, upload the record JSON
+                        if (_useRemoteStorage && _fileServerService != null)
+                        {
+                            Task.Run(async () => {
+                                await _fileServerService.UploadFile(recFilePath, $"records/{recordPath}/{sanitizedName}.json");
+                            });
                         }
 
                         Msg($"Successfully saved record metadata: {record.Name} to {recFilePath}");
